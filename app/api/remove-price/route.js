@@ -41,45 +41,134 @@ function extractStockIdFromUrl(url) {
 
   const pageParam = url.searchParams.get('PAGE') || url.searchParams.get('page');
   if (pageParam) {
-    const fromPageParam = pageParam.match(/Stock_ID=(\d+)/i);
+    const decodedPage = decodeHtml(pageParam);
+    const fromPageParam = decodedPage.match(/Stock_ID=(\d+)/i);
     if (fromPageParam) return fromPageParam[1];
   }
 
   return null;
 }
 
-async function findPrintPdfUrl(originalUrl) {
-  if (/cogcreatepdf/i.test(originalUrl.href) || /cogpdf/i.test(originalUrl.href)) {
-    return originalUrl.href;
+function decodeHtml(value) {
+  return String(value || '')
+    .replaceAll('&amp;', '&')
+    .replaceAll('&#38;', '&')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'");
+}
+
+function addCandidate(candidates, value) {
+  if (!value) return;
+  const cleaned = decodeHtml(value).trim();
+  if (!cleaned) return;
+
+  let url;
+  try {
+    url = new URL(cleaned, DMK_ORIGIN).href;
+  } catch {
+    return;
   }
 
-  const stockId = extractStockIdFromUrl(originalUrl);
-  if (stockId) return buildPrintPdfUrlFromStockId(stockId);
+  if (!candidates.includes(url)) candidates.push(url);
+}
 
+function collectPrintCandidatesFromHtml(html, originalUrl) {
+  const candidates = [];
+  const decodedHtml = decodeHtml(html);
+
+  const hrefRegex = /href=["']([^"']*(?:COGCreatePDF|COGPDF|used-car-details_print\.aspx)[^"']*)["']/gi;
+  let hrefMatch;
+  while ((hrefMatch = hrefRegex.exec(decodedHtml))) {
+    const href = hrefMatch[1];
+    if (/COGCreatePDF|COGPDF/i.test(href)) {
+      addCandidate(candidates, href);
+    } else if (/used-car-details_print\.aspx/i.test(href)) {
+      const pagePath = href.startsWith('/') ? href : `/${href}`;
+      addCandidate(candidates, `/COG/COGPDF/COGCreatePDF.aspx?PAGE=${encodeURIComponent(pagePath)}`);
+    }
+  }
+
+  const cogRegex = /(?:https?:\/\/www\.dmkeith\.com)?\/COG\/COGPDF\/COGCreatePDF\.aspx\?PAGE=[^"'\s<>]+/gi;
+  let cogMatch;
+  while ((cogMatch = cogRegex.exec(decodedHtml))) {
+    addCandidate(candidates, cogMatch[0]);
+  }
+
+  const stockRegex = /Stock_ID(?:=|%3D)(\d+)/gi;
+  let stockMatch;
+  while ((stockMatch = stockRegex.exec(decodedHtml))) {
+    addCandidate(candidates, buildPrintPdfUrlFromStockId(stockMatch[1]));
+  }
+
+  const urlStockId = extractStockIdFromUrl(originalUrl);
+  if (urlStockId) addCandidate(candidates, buildPrintPdfUrlFromStockId(urlStockId));
+
+  return candidates;
+}
+
+async function findPrintPdfCandidates(originalUrl) {
+  const candidates = [];
+
+  if (/cogcreatepdf|cogpdf/i.test(originalUrl.href)) {
+    addCandidate(candidates, originalUrl.href);
+    return candidates;
+  }
+
+  // Important: some DM Keith advert URLs have an ID that is not the same as the print Stock_ID.
+  // So we now read the advert page first and prefer the real Print button link where available.
   const pageResponse = await fetch(originalUrl.href, {
     headers: {
       'user-agent': USER_AGENT,
-      accept: 'text/html,application/xhtml+xml'
+      accept: 'text/html,application/xhtml+xml',
+      referer: DMK_ORIGIN
     },
     cache: 'no-store'
   });
 
-  if (!pageResponse.ok) throw new Error('I could not open that vehicle page.');
-
-  const html = await pageResponse.text();
-  const printHrefMatch = html.match(/href=["']([^"']*COGCreatePDF[^"']*)["']/i);
-  if (printHrefMatch) {
-    return new URL(printHrefMatch[1].replaceAll('&amp;', '&'), DMK_ORIGIN).href;
+  if (pageResponse.ok) {
+    const html = await pageResponse.text();
+    for (const candidate of collectPrintCandidatesFromHtml(html, originalUrl)) {
+      addCandidate(candidates, candidate);
+    }
   }
 
-  const stockIdMatch = html.match(/Stock_ID(?:=|%3D)(\d+)/i) || html.match(/id-(\d+)/i);
-  if (stockIdMatch) return buildPrintPdfUrlFromStockId(stockIdMatch[1]);
+  const urlStockId = extractStockIdFromUrl(originalUrl);
+  if (urlStockId) addCandidate(candidates, buildPrintPdfUrlFromStockId(urlStockId));
 
-  throw new Error('I could not find the print PDF link on that page.');
+  if (!candidates.length) {
+    throw new Error('I could not find the print PDF link on that page.');
+  }
+
+  return candidates;
 }
 
 function bytesLookLikePdf(bytes) {
   return bytes?.[0] === 0x25 && bytes?.[1] === 0x50 && bytes?.[2] === 0x44 && bytes?.[3] === 0x46;
+}
+
+async function fetchPdfFromCandidates(candidates) {
+  const tried = [];
+
+  for (const candidate of candidates) {
+    tried.push(candidate);
+    const pdfResponse = await fetch(candidate, {
+      headers: {
+        'user-agent': USER_AGENT,
+        accept: 'application/pdf,*/*',
+        referer: DMK_ORIGIN
+      },
+      cache: 'no-store'
+    }).catch(() => null);
+
+    if (!pdfResponse || !pdfResponse.ok) continue;
+
+    const inputBytes = new Uint8Array(await pdfResponse.arrayBuffer());
+    if (bytesLookLikePdf(inputBytes)) {
+      return { inputBytes, printPdfUrl: candidate };
+    }
+  }
+
+  throw new Error('I found the print option, but DM Keith did not return a valid PDF for this advert. Try opening the advert in your browser and pressing its Print button once, then paste the direct print PDF link into this tool.');
 }
 
 function coverPriceOnPage(page) {
@@ -115,20 +204,8 @@ export async function POST(request) {
   try {
     const body = await request.json();
     const originalUrl = cleanInputUrl(body.url);
-    const printPdfUrl = await findPrintPdfUrl(originalUrl);
-
-    const pdfResponse = await fetch(printPdfUrl, {
-      headers: {
-        'user-agent': USER_AGENT,
-        accept: 'application/pdf,*/*'
-      },
-      cache: 'no-store'
-    });
-
-    if (!pdfResponse.ok) throw new Error('The print PDF could not be downloaded.');
-
-    const inputBytes = new Uint8Array(await pdfResponse.arrayBuffer());
-    if (!bytesLookLikePdf(inputBytes)) throw new Error('The print link did not return a valid PDF.');
+    const candidates = await findPrintPdfCandidates(originalUrl);
+    const { inputBytes, printPdfUrl } = await fetchPdfFromCandidates(candidates);
 
     const outputBytes = await makePriceRemovedPdf(inputBytes);
     const stockId = extractStockIdFromUrl(new URL(printPdfUrl)) || 'vehicle';
