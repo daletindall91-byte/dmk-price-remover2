@@ -2,8 +2,6 @@
 
 import { useState } from 'react';
 
-const bookmarklet = `javascript:(()=>{const rx=/£\s?\d[\d,]*(?:\.\d{2})?/;const words=['price','monthly','finance','payment','cost'];const seen=new Set();function txt(e){return((e.innerText||e.textContent||'')+'').trim()}function ids(e){return((e.id||'')+' '+(e.className||'')).toLowerCase()}function hide(e){if(!e||seen.has(e))return;seen.add(e);e.setAttribute('data-dmk-price-hidden','yes');e.style.setProperty('color','transparent','important');e.style.setProperty('text-shadow','none','important');e.style.setProperty('background','#fff','important');e.style.setProperty('border-color','transparent','important')}document.querySelectorAll('body *').forEach(e=>{const t=txt(e);const id=ids(e);const leaf=e.children.length===0;if((leaf&&rx.test(t)&&t.length<120)||(rx.test(t)&&words.some(w=>id.includes(w))))hide(e)});setTimeout(()=>window.print(),250)})();`;
-
 export default function Home() {
   const [link, setLink] = useState('');
   const [busy, setBusy] = useState(false);
@@ -51,73 +49,56 @@ export default function Home() {
     if (win) win.focus();
   }
 
-  function openVehiclePage() {
-    if (!link.trim()) {
-      setError('Paste the DM Keith advert link first.');
-      return;
-    }
-    window.open(link.trim(), '_blank', 'noopener,noreferrer');
+  function resetForm() {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    setDownloadUrl('');
+    setFileName('dmk-price-removed.pdf');
+    setError('');
+    setLink('');
   }
 
   return (
     <main className="page">
       <section className="card hero">
-        <p className="eyebrow">DM Keith print helper</p>
-        <h1>Remove the visible price from a vehicle printout</h1>
+        <p className="eyebrow">DM Keith tool</p>
+        <h1>DM Keith Price-Free Printout Tool</h1>
         <p className="intro">
-          DM Keith blocks Vercel from downloading some print PDFs, so the best method is now the browser helper below.
-          It runs on the DM Keith page you already have open, hides the price, then opens your print window.
+          Paste a DM Keith used-car advert link and create a clean A4 printout without the visible price.
         </p>
 
-        <div className="helper-box">
-          <h2>Best method: one-click browser helper</h2>
-          <ol>
-            <li>Drag the green button below to your bookmarks bar once.</li>
-            <li>Open any DM Keith vehicle advert.</li>
-            <li>Click the bookmark. It hides the price and opens the print screen.</li>
-          </ol>
-          <a className="bookmarklet" href={bookmarklet}>DMK Hide Price + Print</a>
-          <p className="small-help">
-            On the print screen, choose your printer or choose Save as PDF.
-          </p>
-        </div>
-
         <form onSubmit={handleSubmit} className="form">
-          <label htmlFor="vehicle-link">Vehicle advert link</label>
+          <label htmlFor="vehicle-link">DM Keith vehicle advert link</label>
           <textarea
             id="vehicle-link"
             value={link}
             onChange={(event) => setLink(event.target.value)}
-            placeholder="https://www.dmkeith.com/used-car-details/.../id-3700060248465819202/"
+            placeholder="Paste DM Keith vehicle link here"
             rows={4}
             required
           />
-          <div className="button-row">
-            <button type="button" onClick={openVehiclePage}>Open vehicle page</button>
-            <button type="submit" disabled={busy}>
-              {busy ? 'Trying PDF...' : 'Try direct PDF method'}
-            </button>
-          </div>
+          <button type="submit" disabled={busy}>
+            {busy ? 'Creating printout...' : 'Create Price-Free Printout'}
+          </button>
         </form>
 
         {error ? <div className="error">{error}</div> : null}
 
         {downloadUrl ? (
           <div className="result">
-            <h2>PDF ready</h2>
-            <p>The price area has been covered. Open it below to check, download or print it.</p>
+            <h2>A4 printout ready</h2>
+            <p>The visible price area has been neatly removed. Check the preview, then download or print.</p>
             <div className="actions">
               <a href={downloadUrl} download={fileName}>Download PDF</a>
-              <button type="button" onClick={printPdf}>Open / Print PDF</button>
+              <button type="button" onClick={printPdf}>Print PDF</button>
+              <button type="button" onClick={resetForm}>Try another vehicle</button>
             </div>
-            <iframe src={downloadUrl} title="Price removed PDF preview" />
+            <iframe src={downloadUrl} title="Price-free A4 PDF preview" />
           </div>
         ) : null}
       </section>
 
       <section className="note">
-        <strong>Important:</strong> the browser helper visually hides visible prices for printing. It does not alter the
-        vehicle advert or remove data from DM Keith.
+        <strong>Important:</strong> this creates a clean showroom printout by visually covering the price area on the PDF.
       </section>
     </main>
   );
