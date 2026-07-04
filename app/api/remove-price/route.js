@@ -1,0 +1,149 @@
+import { PDFDocument, rgb } from 'pdf-lib';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
+
+const DMK_ORIGIN = 'https://www.dmkeith.com';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36';
+
+function cleanInputUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('Paste a DM Keith vehicle link first.');
+
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error('That does not look like a valid link.');
+  }
+
+  const hostname = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+  if (hostname !== 'dmkeith.com') {
+    throw new Error('Please use a dmkeith.com vehicle link.');
+  }
+
+  return parsed;
+}
+
+function buildPrintPdfUrlFromStockId(stockId) {
+  const page = `/used-car-details_print.aspx?Stock_ID=${stockId}`;
+  return `${DMK_ORIGIN}/COG/COGPDF/COGCreatePDF.aspx?PAGE=${encodeURIComponent(page)}`;
+}
+
+function extractStockIdFromUrl(url) {
+  const full = url.href;
+  const fromPath = full.match(/\/id-(\d+)\/?/i);
+  if (fromPath) return fromPath[1];
+
+  const fromQuery = url.searchParams.get('Stock_ID') || url.searchParams.get('stock_id');
+  if (fromQuery && /^\d+$/.test(fromQuery)) return fromQuery;
+
+  const pageParam = url.searchParams.get('PAGE') || url.searchParams.get('page');
+  if (pageParam) {
+    const fromPageParam = pageParam.match(/Stock_ID=(\d+)/i);
+    if (fromPageParam) return fromPageParam[1];
+  }
+
+  return null;
+}
+
+async function findPrintPdfUrl(originalUrl) {
+  if (/cogcreatepdf/i.test(originalUrl.href) || /cogpdf/i.test(originalUrl.href)) {
+    return originalUrl.href;
+  }
+
+  const stockId = extractStockIdFromUrl(originalUrl);
+  if (stockId) return buildPrintPdfUrlFromStockId(stockId);
+
+  const pageResponse = await fetch(originalUrl.href, {
+    headers: {
+      'user-agent': USER_AGENT,
+      accept: 'text/html,application/xhtml+xml'
+    },
+    cache: 'no-store'
+  });
+
+  if (!pageResponse.ok) throw new Error('I could not open that vehicle page.');
+
+  const html = await pageResponse.text();
+  const printHrefMatch = html.match(/href=["']([^"']*COGCreatePDF[^"']*)["']/i);
+  if (printHrefMatch) {
+    return new URL(printHrefMatch[1].replaceAll('&amp;', '&'), DMK_ORIGIN).href;
+  }
+
+  const stockIdMatch = html.match(/Stock_ID(?:=|%3D)(\d+)/i) || html.match(/id-(\d+)/i);
+  if (stockIdMatch) return buildPrintPdfUrlFromStockId(stockIdMatch[1]);
+
+  throw new Error('I could not find the print PDF link on that page.');
+}
+
+function bytesLookLikePdf(bytes) {
+  return bytes?.[0] === 0x25 && bytes?.[1] === 0x50 && bytes?.[2] === 0x44 && bytes?.[3] === 0x46;
+}
+
+function coverPriceOnPage(page) {
+  const width = page.getWidth();
+  const height = page.getHeight();
+
+  const x = width * 0.13;
+  const y = height * 0.435;
+  const maskWidth = width * 0.25;
+  const maskHeight = height * 0.045;
+
+  page.drawRectangle({
+    x,
+    y,
+    width: maskWidth,
+    height: maskHeight,
+    color: rgb(246 / 255, 243 / 255, 242 / 255),
+    borderColor: rgb(246 / 255, 243 / 255, 242 / 255),
+    borderWidth: 0
+  });
+}
+
+async function makePriceRemovedPdf(pdfBytes) {
+  const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const firstPage = pdfDoc.getPages()[0];
+  if (!firstPage) throw new Error('The PDF appears to be empty.');
+
+  coverPriceOnPage(firstPage);
+  return pdfDoc.save();
+}
+
+export async function POST(request) {
+  try {
+    const body = await request.json();
+    const originalUrl = cleanInputUrl(body.url);
+    const printPdfUrl = await findPrintPdfUrl(originalUrl);
+
+    const pdfResponse = await fetch(printPdfUrl, {
+      headers: {
+        'user-agent': USER_AGENT,
+        accept: 'application/pdf,*/*'
+      },
+      cache: 'no-store'
+    });
+
+    if (!pdfResponse.ok) throw new Error('The print PDF could not be downloaded.');
+
+    const inputBytes = new Uint8Array(await pdfResponse.arrayBuffer());
+    if (!bytesLookLikePdf(inputBytes)) throw new Error('The print link did not return a valid PDF.');
+
+    const outputBytes = await makePriceRemovedPdf(inputBytes);
+    const stockId = extractStockIdFromUrl(new URL(printPdfUrl)) || 'vehicle';
+    const fileName = `dmk-${stockId}-price-removed.pdf`;
+
+    return new Response(outputBytes, {
+      status: 200,
+      headers: {
+        'content-type': 'application/pdf',
+        'content-disposition': `attachment; filename="${fileName}"`,
+        'x-file-name': fileName,
+        'cache-control': 'no-store'
+      }
+    });
+  } catch (error) {
+    return Response.json({ error: error.message || 'Something went wrong.' }, { status: 400 });
+  }
+}
