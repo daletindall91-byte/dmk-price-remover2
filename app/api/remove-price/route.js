@@ -3,6 +3,7 @@ import { PDFDocument, rgb } from 'pdf-lib';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
+export const preferredRegion = 'lhr1';
 
 const DMK_ORIGIN = 'https://www.dmkeith.com';
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36';
